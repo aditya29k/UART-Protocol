@@ -1,215 +1,225 @@
 `ifndef CLK_FREQUENCY
-  `define CLK_FREQUENCY 100_000
+	`define CLK_FREQUENCY 100000
 `endif
 
 `ifndef BAUD_RATE
-  `define BAUD_RATE 9600
+	`define BAUD_RATE 9600
+`endif
+
+`ifndef COUNT
+	`define COUNT (`CLK_FREQUENCY/`BAUD_RATE)&(~1)
+`endif
+
+`ifndef DATA_WIDTH
+	`define DATA_WIDTH 8
 `endif
 
 module top(
   input clk, rst,
   
-  // TX
-  input start,
-  input [7:0] data_in,
-  output transmit, done_tx,
-  
-  // RX
   input rx,
-  output [7:0] dout,
-  output done_rx, error_rx
+  output [`DATA_WIDTH-1:0] dout,
+  output done_rx,
+  
+  output tx,
+  output done_tx,
+  input [`DATA_WIDTH-1:0] din,
+  input start
+  
 );
   
-  uart_master_transmit TX(clk, rst, start, data_in, transmit, done_tx);
-  uart_master_receive RX(clk, rst, rx, dout, done_rx, error_rx);
+  wire err;
+  
+  uart_master_tx m0 (clk, rst, tx, done_tx, din, start);
+  uart_master_rx s0 (clk, rst, rx, dout, err, done_rx );
   
 endmodule
 
-
-
-module uart_master_transmit(
+module uart_master_tx(
   input clk, rst,
-  input start,
-  input [7:0] data_in,
-  output reg transmit, done_tx // SENDING MSB FIRST
+  output reg tx, done_tx,
+  input [`DATA_WIDTH-1:0] din,
+  input start
 );
   
-  // GENERATING UART CLOCK
-  
-  localparam clk_count = (`CLK_FREQUENCY/`BAUD_RATE)&(~1);// to make last bit even for 50% duty cycle
-  integer count;
+  // Generation of clock
   
   reg uart_clk;
+  int clk_count;
   
   always@(posedge clk) begin
     if(rst) begin
-      count <= 0;
+      clk_count <= 0;
       uart_clk <= 1'b0;
     end
     else begin
-      if(count < (clk_count/2)-1) begin
-        count <= count + 1;
+      if(clk_count == (`COUNT/2) - 1) begin
+        clk_count <= 0;
+        uart_clk <= ~uart_clk;
       end
       else begin
-        count <= 0;
-        uart_clk <= ~uart_clk;
+        clk_count <= clk_count + 1;
       end
     end
   end
   
-  // FSM for master transmit
+  // FSM for transmit
   
-  typedef enum bit [1:0]{IDLE_TX, DATA_TX, PARITY_TX, STOP_TX} states;
+  typedef enum bit [1:0] {IDLE, TRANS, PARITY, STOP} states;
   states state;
   
-  reg [7:0] temp;
-  reg [3:0] counter;
   reg parity;
   
-  always@(posedge uart_clk, posedge rst) begin
+  reg [`DATA_WIDTH-1:0] temp;
+  integer data_count;
+  
+  always@(posedge uart_clk) begin
     if(rst) begin
+      data_count <= 0;
       temp <= 0;
-      state <= IDLE_TX;
-      counter <= 0;
+      state <= IDLE;
+      tx <= 1'b1;
       done_tx <= 1'b0;
-      transmit <= 1'b1;
       parity <= 1'b0;
     end
     else begin
       case(state)
-        IDLE_TX: begin
+        
+        IDLE: begin
           done_tx <= 1'b0;
           if(start) begin
-            state <= DATA_TX;
-            transmit <= 1'b0; // START BIT
-            temp <= data_in;
-            parity <= ^data_in;
-            counter <= 0;
+            temp <= din;
+            data_count <= 0;
+            state <= TRANS;
+            tx <= 1'b0; // START BIT
+            parity <= ^din;
           end
           else begin
-            state <= IDLE_TX;
-            transmit <= 1'b1;
+            temp <= 0;
+            data_count <= 0;
+            state <= IDLE;
+            tx <= 1'b1;
             parity <= 1'b0;
           end
         end
-        DATA_TX: begin
-          transmit <= temp[7-counter];
-          if(counter<7) begin
-            counter <= counter + 1;
-            state <= DATA_TX;
+        
+        TRANS: begin
+          if(data_count<=7) begin
+            tx <= temp[data_count]; // UART SENDS LSB FIRST
+            data_count <= data_count + 1;
+            state <= TRANS;
           end
           else begin
-            counter <= 0;
-            state <= PARITY_TX;
+            state <= PARITY;
           end
         end
-        PARITY_TX: begin
-          transmit <= parity;
-          state <= STOP_TX;
+        
+        PARITY: begin
+          tx <= parity;
+          state <= STOP;
         end
-        STOP_TX: begin
+        
+        STOP: begin
           done_tx <= 1'b1;
-          transmit <= 1'b1;
-          state <= IDLE_TX;
+          tx <= 1'b1;
+          state <= IDLE;
         end
-        default: state <= IDLE_TX;
+        
       endcase
     end
   end
   
 endmodule
 
-module uart_master_receive(
+module uart_master_rx(
   input clk, rst,
   input rx,
-  output [7:0] dout,
-  output reg done_rx, error_rx
+  output [`DATA_WIDTH-1:0] dout,
+  output reg err,
+  output reg done_rx
 );
   
-  // GENERATING UART CLOCK
-  
-  localparam clk_count = (`CLK_FREQUENCY/`BAUD_RATE)&(~1);// to make last bit even for 50% duty cycle
-  integer count;
+  // Generation of clock
   
   reg uart_clk;
+  int clk_count;
   
   always@(posedge clk) begin
     if(rst) begin
-      count <= 0;
+      clk_count <= 0;
       uart_clk <= 1'b0;
     end
     else begin
-      if(count < (clk_count/2)-1) begin
-        count <= count + 1;
+      if(clk_count == (`COUNT/2) - 1) begin
+        clk_count <= 0;
+        uart_clk <= ~uart_clk;
       end
       else begin
-        count <= 0;
-        uart_clk <= ~uart_clk;
+        clk_count <= clk_count + 1;
       end
     end
   end
   
-  // FSM for mater receive
+  // FSM for reception
   
-  typedef enum bit [1:0] {DETECT_RX, RECEIVE_RX, PARITY_RX, STOP_RX} states;
+  typedef enum bit [1:0] {START, RECV, CHECK, STOP} states;
   states state;
   
-  reg [3:0] counter;
-  reg [7:0] temp;
-  reg parity;
+  reg [`DATA_WIDTH-1:0] temp;
   
-  always@(posedge uart_clk, posedge rst) begin
+  integer data_count;
+  
+  always@(posedge uart_clk) begin
     if(rst) begin
       temp <= 0;
-      counter <= 0;
-      state <= DETECT_RX;
-      parity <= 1'b0;
+      state <= START;
+      err <= 1'b0;
       done_rx <= 1'b0;
-      error_rx <= 1'b0;
+      data_count <= 0;
     end
     else begin
       case(state)
-        DETECT_RX: begin
+        
+        START: begin
+          temp <= 0;
+          err <= 1'b0;
+          data_count <= 0;
           done_rx <= 1'b0;
-          error_rx <= 1'b0;
-          parity <= 1'b0;
           if(!rx) begin
-            counter <= 0;
-            state <= RECEIVE_RX;
-            temp <= 0;
+            state <= RECV;
           end
           else begin
-            state <= DETECT_RX;
+            state <= START;
           end
         end
-        RECEIVE_RX: begin
-          temp[7-counter] <= rx;
-          if(counter<7) begin
-            counter <= counter + 1;
-            state <= RECEIVE_RX;
+        
+        RECV: begin
+          if(data_count<=7) begin
+            temp[data_count] <= rx;
+            data_count <= data_count + 1;
+            state <= RECV;
           end
           else begin
-            state <= PARITY_RX;
-            counter <= 0;
+            state <= CHECK;
           end
         end
-        PARITY_RX: begin
-          parity = ^temp;
-          if(parity == rx) error_rx <= 1'b0;
-          else error_rx <= 1'b1;
-          state <= STOP_RX;
-        end
-        STOP_RX: begin
-          if(rx) begin
-            done_rx <= 1'b1;
-          	state <= DETECT_RX;
+        
+        CHECK: begin
+          if(rx != ^temp) begin
+            err <= 1'b1;
           end
+          state <= STOP;
         end
-        default: state <= DETECT_RX;
+        
+        STOP: begin
+          done_rx <= 1'b1;
+          state <= START;
+        end
+        
       endcase
     end
   end
   
-  assign dout = (rst)? 0:temp;
+  assign dout = temp;
   
 endmodule
